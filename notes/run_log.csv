@@ -1,3 +1,6 @@
 time,run,git_commit,seed,peg_offset_mm,success,steps,max_force_N,phase_miss_mm,note
 20261103_112231,run_20261103_112231_off0_0mm,6bb0192,0,"[0.0, 0.0]",False,691,7.23,"{'transport': 5.4, 'insert': 45.6}",실행마다 폴더 분리
 20261103_112443,run_20261103_112443_off0_0mm,6bb0192,0,"[0.0, 0.0]",True,896,417.03,"{'descend': 5.2, 'transport': 10.6, 'insert': 99.7}",잡기 높이 버그 수정
+20261103_113835,run_20261103_113835_off0_0mm,ea6f317,0,"[0.0, 0.0]",True,896,417.03,"{'descend': 5.2, 'transport': 10.6, 'insert': 99.7}",잡기 높이 버그 수정
+20261103_113919,run_20261103_113919_off0_0mm,ea6f317,0,"[0.0, 0.0]",True,896,417.03,"{'descend': 5.2, 'transport': 10.6, 'insert': 99.7}",잡기 높이 버그 수정
+20261103_114358,run_20261103_114358_off0_0mm,ea6f317,0,"[0.0, 0.0]",True,896,417.03,"{'descend': 5.2, 'transport': 10.6, 'insert': 99.7}",잡기 높이 버그 수정
