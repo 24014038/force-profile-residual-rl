@@ -22,7 +22,9 @@
 
 사용 예:
   python scripts/record_demo.py
-  python scripts/record_demo.py --render
+  python scripts/record_demo.py --render            # 화면으로 보기 (실제 속도, 끝나고 5 s 유지)
+  python scripts/record_demo.py --gif                # demo.gif 저장 (화면 없이, 노션 캡처용)
+  python scripts/record_demo.py --gif --camera closeup
 """
 
 import argparse
@@ -30,6 +32,7 @@ import datetime
 import json
 import os
 import sys
+import time
 
 import numpy as np
 
@@ -40,7 +43,8 @@ PHASES = ["FREE", "PRESS", "INSERT", "RELEASE"]
 
 
 def record(env, press_N=10.0, insert_N=15.0, contact_N=2.0, entry_mm=2.0,
-           depth_mm=25.0, speed_mm_s=10.0, max_steps=400, render=False):
+           depth_mm=25.0, speed_mm_s=10.0, max_steps=400, render=False,
+           frames=None, camera="side"):
     env.reset()
     dt = 1.0 / env.control_freq
     step = speed_mm_s * 1e-3 * dt
@@ -51,6 +55,7 @@ def record(env, press_N=10.0, insert_N=15.0, contact_N=2.0, entry_mm=2.0,
     log = {k: [] for k in ["t", "tip", "target", "force", "torque", "phase",
                            "depth", "contact", "ff_cmd"]}
 
+    prev_tip, push = None, 0.0
     for k in range(max_steps):
         tip = env.peg_tip_pos()
         fz_up = -env.wrist_force_world()[2]          # 위쪽 반력 (누르면 양수)
@@ -60,31 +65,42 @@ def record(env, press_N=10.0, insert_N=15.0, contact_N=2.0, entry_mm=2.0,
             phase, z_contact = 1, tip[2]
         elif phase == 1 and tip[2] < z_contact - entry_mm * 1e-3:
             phase = 2
-        elif phase == 2 and env.insertion_depth() >= depth_mm * 1e-3:
+        elif phase == 2 and tip[2] <= z_contact - (depth_mm - 1.0) * 1e-3:
             phase = 3
 
-        # ---- 명령: 힘 제한 위치 제어 (교시자 = "10 mm/s로 내리되 설정 힘 이상은 안 민다")
-        # 목표를 10 mm/s로 내리고, 목표가 막대보다 F/K 이상 앞서지 않게 묶는다.
-        # 막히면 스프링 힘이 설정 힘까지만 쌓이고, 안 막히면 그냥 10 mm/s로 따라 내려간다.
-        if phase == 0:
-            f_lim = press_N
-        elif phase == 1:
-            f_lim = press_N
+        # ---- 명령
+        # FREE/PRESS: 힘 제한 위치 제어. 목표를 10 mm/s로 내리되 막대보다 F_lim/K 이상 앞서지 않게 묶는다.
+        # INSERT    : 사람처럼 민다. 10 mm/s보다 느리면(막히면) 미는 힘을 올리고(최대 insert_N),
+        #             빠르면(걸쇠를 넘어 튀면) 뺀다. 위치 목표는 막대 끝에 붙여 스프링 힘 0.
+        # RELEASE   : 힘 0, 제자리.
+        v_down = 0.0 if prev_tip is None else (prev_tip[2] - tip[2]) / dt
+        if phase in (0, 1):
+            tgt[2] = max(tgt[2] - step, tip[2] - press_N / env.k_trans)
+            push = 0.0
         elif phase == 2:
-            f_lim = insert_N
-        else:
-            f_lim = 0.0
-        if phase < 3:
-            tgt[2] = max(tgt[2] - step, tip[2] - f_lim / env.k_trans)
+            # 속도 오차에 비례해 미는 힘을 조절. 느리면 천천히 올리고(10 mm/s 오차당 1 s에 20 N),
+            # 빠르면(딸깍 후 튀어 나감) 세 배 빠르게 뺀다 — 사람이 걸쇠를 넘긴 직후 힘을 푸는 것과 같음
+            err = speed_mm_s * 1e-3 - v_down
+            gain = 2000.0 if err > 0 else 6000.0
+            push = float(np.clip(push + gain * err * dt, 0.0, insert_N))
+            if v_down > 2 * speed_mm_s * 1e-3:      # 딸깍: 기준 속도의 두 배를 넘으면 바로 힘을 뺀다
+                push = 0.0
+            tgt[2] = tip[2]
         else:
             tgt[2] = tip[2]
+            push = 0.0
             release_count += 1
-        ff = f_lim if phase in (1, 2) else 0.0   # 기록용: 교시자가 의도한 최대 누름 힘
+        ff = push
 
-        env.ff_force = np.zeros(3)
+        env.ff_force = np.array([0.0, 0.0, -push])
+        prev_tip = tip.copy()
         env.step(env.tip_target_action(tgt))
         if render:
             env.render()
+            time.sleep(dt)                           # 실제 속도로 보이게
+        if frames is not None:
+            frames.append(grab_frame(env, camera, PHASES[phase], -env.wrist_force_world()[2],
+                                     env.insertion_depth(), k * dt))
 
         log["t"].append(k * dt)
         log["tip"].append(env.peg_tip_pos())
@@ -106,6 +122,23 @@ def record(env, press_N=10.0, insert_N=15.0, contact_N=2.0, entry_mm=2.0,
     return out
 
 
+def grab_frame(env, camera, phase_name, fz_up, depth, t, w=640, h=480):
+    """오프스크린 렌더 한 장 + 단계·깊이·힘 글자."""
+    from PIL import Image, ImageDraw
+    img = env.sim.render(width=w, height=h, camera_name=camera)[::-1]
+    im = Image.fromarray(np.ascontiguousarray(img))
+    dr = ImageDraw.Draw(im)
+    txt = f"t={t:4.2f}s  {phase_name:<7s}  depth={depth*1e3:5.1f} mm  Fz={fz_up:5.1f} N"
+    dr.rectangle([0, 0, w, 22], fill=(0, 0, 0))
+    dr.text((8, 5), txt, fill=(255, 255, 255))
+    return im
+
+
+def save_gif(frames, path, dt):
+    frames[0].save(path, save_all=True, append_images=frames[1:],
+                   duration=int(dt * 1000), loop=0)
+
+
 def summarize(d):
     ph = d["phase"]
     starts = {PHASES[p]: int(np.argmax(ph == p)) if np.any(ph == p) else None for p in range(4)}
@@ -123,7 +156,7 @@ def plot(d, path):
     ax[0].plot(t, d["depth"] * 1e3, label="insertion depth")
     ax[0].set_ylabel("depth (mm)")
     ax[1].plot(t, -d["force"][:, 2], label="measured F_z (up)")
-    ax[1].plot(t, d["ff_cmd"], "--", label="push limit")
+    ax[1].plot(t, d["ff_cmd"], "--", label="teacher push (command)")
     ax[1].set_ylabel("force (N)")
     ax[1].set_xlabel("time (s)")
     ph = d["phase"]
@@ -145,17 +178,27 @@ def main():
     ap.add_argument("--chamfer-mm", type=float, default=1.0)
     ap.add_argument("--demo-offset-mm", type=float, nargs=2, default=[1.0, 0.0])
     ap.add_argument("--press-N", type=float, default=10.0)
-    ap.add_argument("--insert-N", type=float, default=15.0)
-    ap.add_argument("--resist-N", type=float, default=0.0, help="끼움 저항 (0이면 없음)")
+    ap.add_argument("--insert-N", type=float, default=20.0)
+    ap.add_argument("--resist", default="snap", choices=["none", "const", "snap"])
+    ap.add_argument("--resist-N", type=float, default=8.0, help="const일 때 일정 저항")
+    ap.add_argument("--snap-peak-N", type=float, default=12.0)
     ap.add_argument("--render", action="store_true")
-    ap.add_argument("--camera", default="side")
+    ap.add_argument("--camera", default="side", help="side(단면) / closeup / frontview")
+    ap.add_argument("--gif", action="store_true", help="demo.gif 저장 (화면 없이)")
     ap.add_argument("--out", default="data/demo")
     a = ap.parse_args()
 
     env = PegHoleEnv(clearance_mm=a.clearance_mm, chamfer_mm=a.chamfer_mm,
-                     offset_mm=tuple(a.demo_offset_mm), insert_resist_N=a.resist_N, has_renderer=a.render,
-                     render_camera=a.camera)
-    d = record(env, press_N=a.press_N, insert_N=a.insert_N, render=a.render)
+                     offset_mm=tuple(a.demo_offset_mm), resist=a.resist, insert_resist_N=a.resist_N,
+                     snap_peak_N=a.snap_peak_N, has_renderer=a.render,
+                     has_offscreen_renderer=a.gif, render_camera=a.camera)
+    frames = [] if a.gif else None
+    d = record(env, press_N=a.press_N, insert_N=a.insert_N, render=a.render,
+               frames=frames, camera=a.camera)
+    if a.render:
+        for _ in range(int(5.0 * env.control_freq)):     # 끝난 모습 5 s 유지
+            env.render()
+            time.sleep(1.0 / env.control_freq)
     starts, mean_fz = summarize(d)
     success = bool(d["depth"][-1] >= env.success_depth)
 
@@ -166,7 +209,7 @@ def main():
     meta = dict(
         clearance_mm=a.clearance_mm, chamfer_mm=a.chamfer_mm,
         demo_offset_mm=a.demo_offset_mm, press_N=a.press_N, insert_N=a.insert_N,
-        insert_resist_N=a.resist_N, k_trans=env.k_trans, success=success, steps=int(len(d["t"])),
+        resist=a.resist, insert_resist_N=a.resist_N, snap_peak_N=a.snap_peak_N, k_trans=env.k_trans, success=success, steps=int(len(d["t"])),
         final_depth_mm=float(d["depth"][-1] * 1e3),
         max_contact_N=float(d["contact"].max()),
         phase_start_step=starts, mean_measured_Fz_up_N=mean_fz,
@@ -174,6 +217,12 @@ def main():
     with open(os.path.join(out_dir, "meta.json"), "w") as f:
         json.dump(meta, f, indent=2, ensure_ascii=False)
     plot(d, os.path.join(out_dir, "profile.png"))
+    if frames:
+        save_gif(frames, os.path.join(out_dir, "demo.gif"), 1.0 / env.control_freq)
+        frames[0].save(os.path.join(out_dir, "frame_start.png"))
+        i_peak = int(np.argmax(-d["force"][:, 2] * (d["phase"] == 2) * (d["contact"] < 1.0)))
+        frames[i_peak].save(os.path.join(out_dir, "frame_snap.png"))
+        frames[-1].save(os.path.join(out_dir, "frame_end.png"))
     latest = os.path.join(a.out, "latest")
     if os.path.islink(latest) or os.path.exists(latest):
         os.remove(latest)

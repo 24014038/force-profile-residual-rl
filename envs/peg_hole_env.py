@@ -44,8 +44,12 @@ class PegHoleEnv(ManipulationEnv):
         k_trans=1000.0,          # 병진 강성 (N/m), x·y·z 동일
         k_rot=50.0,              # 회전 강성 (N·m/rad)
         damping_ratio=1.0,
-        insert_resist_N=0.0,     # 끼움 저항 (쿨롱 마찰, 깊이 resist_from_mm 이후). 0이면 없음
-        resist_from_mm=2.0,
+        resist="none",           # 구멍 안 저항: "none" | "const" | "snap"
+        insert_resist_N=0.0,     # const: 일정 저항 (N)
+        resist_from_mm=2.0,      # 저항 시작 깊이
+        base_resist_N=3.0,       # snap: 기본 마찰 (N, 움직일 때)
+        snap_peak_N=12.0,        # snap: 걸쇠 반발력 정점 (N)
+        snap_mm=(15.0, 17.5),    # snap: (반발 시작, 정점) 깊이. 정점을 넘으면 반발력 0
         has_renderer=False,
         has_offscreen_renderer=False,
         render_camera="frontview",
@@ -55,8 +59,14 @@ class PegHoleEnv(ManipulationEnv):
         **kwargs,
     ):
         self.clearance = clearance_mm * MM
+        if resist == "none" and insert_resist_N > 0:
+            resist = "const"
+        self.resist = resist
         self.insert_resist = insert_resist_N
         self.resist_from = resist_from_mm * MM
+        self.base_resist = base_resist_N
+        self.snap_peak = snap_peak_N
+        self.snap_mm = tuple(snap_mm)
         self.chamfer = chamfer_mm * MM
         self.peg_half = peg_half_mm * MM
         self.peg_len = peg_len_mm * MM
@@ -163,6 +173,18 @@ class PegHoleEnv(ManipulationEnv):
                                rgba="0.85 0.55 0.3 0.25" if name.endswith("ny") else "0.85 0.55 0.3 1",
                                group="1", **ck)
                 body.append(g)
+
+        # 걸쇠 위치 표시 (보이기만 하고 충돌 없음, 물리에 영향 없음). 걸쇠 힘은 _pre_action에서 따로 가함
+        if self.resist == "snap":
+            z0, z1 = -self.snap_mm[1] * MM, -self.snap_mm[0] * MM
+            tab = 0.2 * MM
+            # 앞(-y)·뒤(+y) 벽 안쪽 면에 주황 띠. 앞쪽은 반투명이라 막대 위에 겹쳐 보인다
+            for sgn, nm, alpha in ((1, "py", "1"), (-1, "ny", "0.45")):
+                body.append(new_geom(name=f"snap_mark_{nm}", type="box",
+                                     size=(a, tab / 2, (z1 - z0) / 2),
+                                     pos=(0, sgn * (a - tab / 2), (z0 + z1) / 2),
+                                     rgba=f"0.95 0.45 0.1 {alpha}", group=1,
+                                     contype="0", conaffinity="0"))
 
         # 구멍을 비스듬히 내려다보는 카메라 (closeup), 단면처럼 옆에서 보는 카메라 (side)
         body.append(ET.Element("camera", name="closeup", mode="fixed",
@@ -347,14 +369,40 @@ class PegHoleEnv(ManipulationEnv):
         d.ctrl[self._grip_act] = self._grip_ctrl
         self._last_torque = tau
 
-        # 끼움 저항: 구멍 안(깊이 > resist_from)에서 막대 이동 반대 방향으로 일정 마찰력.
-        # O-링/억지 끼움처럼 '밀어야 들어가는' 구간을 표현. 2 mm/s 이하에서는 선형(정지 시 0).
+        # 구멍 안 저항 (xfrc_applied로 막대에 직접 가함)
+        #  - 마찰: 움직이는 반대 방향, 5 mm/s 이하에서는 속도에 비례 (수치 안정용)
+        #  - 걸쇠: 깊이에 따른 반발 스프링 (위쪽). 정점을 넘으면 0 → 힘이 모자라면 확실히 멈춘다
         f = np.zeros(6)
-        if self.insert_resist > 0 and self.insertion_depth() > self.resist_from:
+        depth = self.insertion_depth()
+        R = self.friction_force(depth)
+        if R > 0:
             vel = np.zeros(6)
             mujoco.mj_objectVelocity(m, d, mujoco.mjtObj.mjOBJ_SITE, self.peg_tip_site_id, vel, 0)
-            f[2] = -self.insert_resist * np.clip(vel[5] / 0.002, -1.0, 1.0)
+            f[2] -= R * np.clip(vel[5] / 0.005, -1.0, 1.0)
+        f[2] += self.snap_force(depth)
         d.xfrc_applied[self.peg_body_id] = f
+
+    def friction_force(self, depth):
+        """깊이(m)에 따른 마찰 크기(N). 이동 반대 방향."""
+        if self.resist == "none" or depth <= self.resist_from:
+            return 0.0
+        if self.resist == "const":
+            return self.insert_resist
+        return self.base_resist
+
+    def snap_force(self, depth):
+        """걸쇠 반발력(N, 위쪽 +). 갈고리가 휘며 깊이에 비례해 커지다가 정점을 넘으면 사라진다."""
+        if self.resist != "snap":
+            return 0.0
+        z = depth / MM
+        a, b = self.snap_mm
+        if a <= z < b:
+            return self.snap_peak * (z - a) / (b - a)
+        return 0.0
+
+    def resist_profile(self, depth):
+        """움직이는 중 막대가 받는 총 저항(N). 그림·분석용."""
+        return self.friction_force(depth) + self.snap_force(depth)
 
     # ------------------------------------------------------------ helpers
 
