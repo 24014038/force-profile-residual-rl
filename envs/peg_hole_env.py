@@ -48,8 +48,9 @@ class PegHoleEnv(ManipulationEnv):
         insert_resist_N=0.0,     # const: 일정 저항 (N)
         resist_from_mm=2.0,      # 저항 시작 깊이
         base_resist_N=3.0,       # snap: 기본 마찰 (N, 움직일 때)
-        snap_peak_N=12.0,        # snap: 걸쇠 반발력 정점 (N)
+        snap_peak_N=14.0,        # snap: 걸쇠 반발력 정점 (N)
         snap_mm=(15.0, 17.5),    # snap: (반발 시작, 정점) 깊이. 정점을 넘으면 반발력 0
+        snap_retention_N=30.0,   # snap: 한번 걸린 뒤 빠지지 않게 잡는 힘 (최대)
         has_renderer=False,
         has_offscreen_renderer=False,
         render_camera="frontview",
@@ -67,6 +68,8 @@ class PegHoleEnv(ManipulationEnv):
         self.base_resist = base_resist_N
         self.snap_peak = snap_peak_N
         self.snap_mm = tuple(snap_mm)
+        self.snap_retention = snap_retention_N
+        self.latched = False
         self.chamfer = chamfer_mm * MM
         self.peg_half = peg_half_mm * MM
         self.peg_len = peg_len_mm * MM
@@ -279,6 +282,7 @@ class PegHoleEnv(ManipulationEnv):
         self.nominal_hole_top = tip - np.array([0.0, 0.0, self.start_height])
         self.tip_target = tip.copy()
         self.ff_force = np.zeros(3)
+        self.latched = False
         self.set_offset(self.offset)
 
     def _settle_vertical(self):
@@ -396,13 +400,21 @@ class PegHoleEnv(ManipulationEnv):
             return 0.0
         z = depth / MM
         a, b = self.snap_mm
+        if z >= b:
+            self.latched = True                       # 딸깍: 걸림
+        if self.latched:
+            # 걸린 뒤에는 빠지려 하면 아래로 잡아당긴다 (0.5 mm에 최대 힘, 그 이상은 일정)
+            return -self.snap_retention * float(np.clip((b - z) / 0.5, 0.0, 1.0))
         if a <= z < b:
             return self.snap_peak * (z - a) / (b - a)
         return 0.0
 
     def resist_profile(self, depth):
-        """움직이는 중 막대가 받는 총 저항(N). 그림·분석용."""
-        return self.friction_force(depth) + self.snap_force(depth)
+        """들어가는 중(걸리기 전) 막대가 받는 총 저항(N). 그림·분석용. 상태를 바꾸지 않는다."""
+        z = depth / MM
+        a, b = self.snap_mm
+        snap = self.snap_peak * (z - a) / (b - a) if (self.resist == "snap" and a <= z < b) else 0.0
+        return self.friction_force(depth) + snap
 
     # ------------------------------------------------------------ helpers
 
@@ -430,16 +442,26 @@ class PegHoleEnv(ManipulationEnv):
         d = self.peg_tip_pos()[:2] - self.hole_top[:2]
         return float(np.linalg.norm(d))
 
-    def contact_force_norm(self):
-        """막대-구멍 접촉력 합력의 크기 (N, 시뮬레이터 직접 계산)."""
+    def contact_force_vec(self):
+        """막대가 구멍 형상에서 받는 접촉력 합 (world, N). 법선은 geom1→geom2 방향."""
         total = np.zeros(3)
         f6 = np.zeros(6)
         for i in range(self.sim.data.ncon):
             con = self.sim.data.contact[i]
             if self.peg_geom_id in (con.geom1, con.geom2):
                 mujoco.mj_contactForce(self.sim.model._model, self.sim.data._data, i, f6)
-                total += con.frame.reshape(3, 3).T @ f6[:3]   # 접촉 좌표 → world, 벡터 합
-        return float(np.linalg.norm(total))
+                f = con.frame.reshape(3, 3).T @ f6[:3]          # 접촉 좌표 → world
+                total += f if con.geom2 == self.peg_geom_id else -f   # 막대가 받는 힘으로 부호 통일
+        return total
+
+    def contact_force_norm(self):
+        """막대-구멍 형상 접촉력 합력의 크기 (N). 걸쇠·마찰 반발력은 포함하지 않음."""
+        return float(np.linalg.norm(self.contact_force_vec()))
+
+    def interaction_force_norm(self):
+        """막대가 환경에서 받는 힘 전체의 크기 (N) = 형상 접촉력 + 걸쇠·마찰 반발력."""
+        f = self.contact_force_vec() + self.sim.data.xfrc_applied[self.peg_body_id][:3]
+        return float(np.linalg.norm(f))
 
     # ------------------------------------------------------- task logic
     def _check_success(self):

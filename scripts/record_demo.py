@@ -181,7 +181,7 @@ def main():
     ap.add_argument("--insert-N", type=float, default=20.0)
     ap.add_argument("--resist", default="snap", choices=["none", "const", "snap"])
     ap.add_argument("--resist-N", type=float, default=8.0, help="const일 때 일정 저항")
-    ap.add_argument("--snap-peak-N", type=float, default=12.0)
+    ap.add_argument("--snap-peak-N", type=float, default=14.0)
     ap.add_argument("--render", action="store_true")
     ap.add_argument("--camera", default="side", help="side(단면) / closeup / frontview")
     ap.add_argument("--gif", action="store_true", help="demo.gif 저장 (화면 없이)")

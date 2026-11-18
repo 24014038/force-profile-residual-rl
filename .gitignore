@@ -4,3 +4,6 @@ data/
 results/
 *.npy
 *.npz
+
+# 본 실험 교시는 재현을 위해 Git에 포함
+!demos/**/*.npz

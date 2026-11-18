@@ -1,0 +1,30 @@
+{
+  "clearance_mm": 0.5,
+  "chamfer_mm": 1.0,
+  "demo_offset_mm": [
+    1.0,
+    0.0
+  ],
+  "press_N": 10.0,
+  "insert_N": 20.0,
+  "resist": "snap",
+  "insert_resist_N": 8.0,
+  "snap_peak_N": 14.0,
+  "k_trans": 1000.0,
+  "success": true,
+  "steps": 119,
+  "final_depth_mm": 25.610764930384278,
+  "max_contact_N": 29.46355045005275,
+  "phase_start_step": {
+    "FREE": 0,
+    "PRESS": 23,
+    "INSERT": 32,
+    "RELEASE": 99
+  },
+  "mean_measured_Fz_up_N": {
+    "FREE": 1.1282027992643848,
+    "PRESS": 1.0276434885272776,
+    "INSERT": 4.459173724818636,
+    "RELEASE": 0.25364662968833673
+  }
+}
